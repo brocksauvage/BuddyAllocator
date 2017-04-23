@@ -24,7 +24,11 @@
 #define MIN_ORDER 12
 #define MAX_ORDER 20
 
+#define MEMORY_AREA (1 << MAX_ORDER)
 #define PAGE_SIZE (1<<MIN_ORDER)
+
+#define PAGE_NUM (MEMORY_AREA/PAGE_SIZE)
+
 /* page index to address */
 #define PAGE_TO_ADDR(page_idx) (void *)((page_idx*PAGE_SIZE) + g_memory)
 
@@ -103,6 +107,39 @@ void buddy_init()
 }
 
 /**
+ * Ceiling function that will find the exponent needed to calculate the size of
+ * of smallest block needed for a memory allocation.
+ *
+ */
+
+int order_exp(int size)
+{
+    int order_num = MIN_ORDER;
+    
+    while((1 << order_num) < size && order_num <= MAX_ORDER)
+    {
+        order_num++;
+    }
+    
+    return order_num;
+}
+
+void split(int order, int index)
+{
+    //Get our page structure from list
+
+    page_t *cur_page = &g_pages[ADDR_TO_PAGE(BUDDY_ADDR(PAGE_TO_ADDR(index), (order - 1)))];
+    
+    //Add page to proper list
+    
+    list_add(&(cur_page->list), &free_area[order-1]);
+    
+    //Recursive call to keep splitting if necessary
+    
+    split(order, index);
+    
+}
+/**
  * Allocate a memory block.
  *
  * On a memory request, the allocator returns the head of a free-list of the
@@ -120,12 +157,50 @@ void *buddy_alloc(int size)
 {
     printStats();
 	/* TODO: IMPLEMENT THIS FUNCTION */
-    if(size <= 0 || size > (1 << MAX_ORDER))
+    if(size <= 0 || size > (MEMORY_AREA))
     {
         return NULL;
     }
     
-	return NULL;
+    //Gets the correct order based on the size of the request
+    int order = order_exp(size);
+    
+    page_t *entry = NULL;
+    
+    //Iterate through the free lists to find a block
+    for(int i = order; i < MAX_ORDER; i++)
+    {
+        //If we have found a list with a free block of the proper size, return the entry.
+        if(!list_empty(&free_area[i]) && i == order)
+        {
+            //We found a block of proper size, so we can return it.
+            entry = list_entry(free_area[i].next, page_t, list);
+            list_del(free_area[i].next);
+            return(entry);
+        }
+        else if(!list_empty(&free_area[i]) && i > order)
+        {
+            //We found the next best solution - the next free block of a larger size
+            entry = list_entry(free_area[i].next, page_t, list);
+            list_del(free_area[i].next);
+            break;
+        }
+     
+    }
+    
+    //Get the index for our recursive function
+    
+    int cur_index = entry->page_index;
+    
+    list_del_init(&(entry->list));
+    
+    entry->block_size = order;
+    
+    //Call the recursive function to split even further
+    
+    split(order, cur_index);
+    
+    return (PAGE_TO_ADDR(cur_index));
 }
 
 /**
@@ -140,6 +215,49 @@ void *buddy_alloc(int size)
 void buddy_free(void *addr)
 {
 	/* TODO: IMPLEMENT THIS FUNCTION */
+    
+    int free_index = ADDR_TO_PAGE(addr);
+    page_t *free_page = &g_pages[free_index];
+    int free_order = free_page->block_size;
+    page_t *buddy_block = NULL;
+    struct list_head *temp_list;
+    int found = 0;
+    
+    for(int i = free_order; i <= MAX_ORDER; i++)
+    {
+        if(i == MAX_ORDER)
+        {
+            free_page->block_size = MAX_ORDER;
+            list_add(&free_page->list, &free_area[i]);
+        }
+        
+        buddy_block = &g_pages[ADDR_TO_PAGE(BUDDY_ADDR(PAGE_TO_ADDR(free_page->page_index), i))];
+        list_for_each(temp_list, &free_area[i])
+        {
+            if(buddy_block == list_entry(temp_list, page_t, list))
+            {
+                found = 1;
+            }
+        }
+        
+        if(found == 0)
+        {
+            break;
+        }
+        else
+        {
+            list_del_init(&buddy_block->list);
+            if(buddy_block->page_index < free_page->page_index)
+            {
+                free_page = buddy_block;
+            }
+        }
+        free_order = i;
+    }
+    
+    free_page -> block_size = free_order;
+    list_add(&free_page->list, &free_area[free_order]);
+    
 }
 
 /**
@@ -166,5 +284,7 @@ void printStats()
     printf("MIN ORDER: %d\n", MIN_ORDER);
     printf("MAX ORDER: %d\n", MAX_ORDER);
     printf("PAGE SIZE: %d\n", PAGE_SIZE);
+    printf("MEMORY AREA: %d\n", MEMORY_AREA);
+    printf("PAGE NUM: %d\n", PAGE_NUM);
     
 }
