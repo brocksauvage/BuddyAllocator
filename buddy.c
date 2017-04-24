@@ -54,11 +54,9 @@
  **************************************************************************/
 typedef struct {
 	struct list_head list;
-	/* TODO: DECLARE NECESSARY MEMBER VARIABLES */
-    
     int block_size;
     int page_index;
-    char *block_address;
+    void *block_address;
 } page_t;
 
 /**************************************************************************
@@ -91,10 +89,11 @@ void buddy_init()
 	for (i = 0; i < n_pages; i++) {
 		/* TODO: INITIALIZE PAGE STRUCTURES */
         INIT_LIST_HEAD(&g_pages[i].list);
-        
+       
         g_pages[i].block_size = -1;
         g_pages[i].page_index = i;
         g_pages[i].block_address = PAGE_TO_ADDR(i);
+      
 	}
 
 	/* initialize freelist */
@@ -104,6 +103,8 @@ void buddy_init()
 
 	/* add the entire memory as a freeblock */
 	list_add(&g_pages[0].list, &free_area[MAX_ORDER]);
+    
+    g_pages[0].block_size = MAX_ORDER;
 }
 
 /**
@@ -116,7 +117,7 @@ int order_exp(int size)
 {
     int order_num = MIN_ORDER;
     
-    while((1 << order_num) < size && order_num <= MAX_ORDER)
+    while((1 << order_num) < size && order_num < MAX_ORDER)
     {
         order_num++;
     }
@@ -124,8 +125,14 @@ int order_exp(int size)
     return order_num;
 }
 
-void split(int order, int index)
+void split(int order, int targetOrder, int index)
 {
+    
+    if(order == targetOrder)
+    {
+        return;
+    }
+    
     //Get our page structure from list
 
     page_t *cur_page = &g_pages[ADDR_TO_PAGE(BUDDY_ADDR(PAGE_TO_ADDR(index), (order - 1)))];
@@ -136,8 +143,22 @@ void split(int order, int index)
     
     //Recursive call to keep splitting if necessary
     
-    split(order, index);
+    split(order-1, targetOrder, index);
     
+}
+
+void merge(int order, void *addr)
+{
+    if(order == MAX_ORDER)
+    {
+        return;
+    }
+    
+    page_t *cur_page = &g_pages[ADDR_TO_PAGE(BUDDY_ADDR(addr, (order+1)))];
+    
+    list_del((&cur_page->list));
+    
+    merge(order+1, addr);
 }
 /**
  * Allocate a memory block.
@@ -155,12 +176,7 @@ void split(int order, int index)
  */
 void *buddy_alloc(int size)
 {
-    printStats();
 	/* TODO: IMPLEMENT THIS FUNCTION */
-    if(size <= 0 || size > (MEMORY_AREA))
-    {
-        return NULL;
-    }
     
     //Gets the correct order based on the size of the request
     int order = order_exp(size);
@@ -168,39 +184,47 @@ void *buddy_alloc(int size)
     page_t *entry = NULL;
     
     //Iterate through the free lists to find a block
-    for(int i = order; i < MAX_ORDER; i++)
+    for(int i = order; i <= MAX_ORDER; i++)
     {
+        
         //If we have found a list with a free block of the proper size, return the entry.
-        if(!list_empty(&free_area[i]) && i == order)
+        if(!list_empty(&free_area[i]))
         {
-            //We found a block of proper size, so we can return it.
-            entry = list_entry(free_area[i].next, page_t, list);
-            list_del(free_area[i].next);
-            return(entry);
+
+            if(i == order)
+            {
+                //We found a block of proper size, so we can return it.
+                entry = list_entry(free_area[i].next, page_t, list);
+            
+                list_del(&(entry->list));
+            
+                return((entry->block_address));
+            }
+            else
+            {
+                //We found the next best solution - the next free block of a larger size
+        
+                entry = list_entry(free_area[i].next, page_t, list);
+                
+                //Get the index for our recursive function
+                
+                int cur_index = entry->page_index;
+                
+                list_del(&(entry->list));
+                
+                entry->block_size = order;
+                
+                //Call the recursive function to split even further
+            
+                split(i, order, cur_index);
+              
+                return (entry->block_address);
+            }
         }
-        else if(!list_empty(&free_area[i]) && i > order)
-        {
-            //We found the next best solution - the next free block of a larger size
-            entry = list_entry(free_area[i].next, page_t, list);
-            list_del(free_area[i].next);
-            break;
-        }
-     
     }
     
-    //Get the index for our recursive function
-    
-    int cur_index = entry->page_index;
-    
-    list_del_init(&(entry->list));
-    
-    entry->block_size = order;
-    
-    //Call the recursive function to split even further
-    
-    split(order, cur_index);
-    
-    return (PAGE_TO_ADDR(cur_index));
+    return NULL;
+   
 }
 
 /**
@@ -214,50 +238,61 @@ void *buddy_alloc(int size)
  */
 void buddy_free(void *addr)
 {
-	/* TODO: IMPLEMENT THIS FUNCTION */
+	//Calculate the address of our buddy block
     
     int free_index = ADDR_TO_PAGE(addr);
+    
     page_t *free_page = &g_pages[free_index];
+    
     int free_order = free_page->block_size;
+    
     page_t *buddy_block = NULL;
+    
+    //Just a list for handling and manipulating blocks while merging
+    
     struct list_head *temp_list;
-    int found = 0;
+    
+    //Iterate through our lists
     
     for(int i = free_order; i <= MAX_ORDER; i++)
     {
-        if(i == MAX_ORDER)
-        {
-            free_page->block_size = MAX_ORDER;
-            list_add(&free_page->list, &free_area[i]);
-        }
+        buddy_block = NULL;
         
-        buddy_block = &g_pages[ADDR_TO_PAGE(BUDDY_ADDR(PAGE_TO_ADDR(free_page->page_index), i))];
+        //Get our buddy block
+        
         list_for_each(temp_list, &free_area[i])
         {
-            if(buddy_block == list_entry(temp_list, page_t, list))
+            buddy_block = list_entry(temp_list, page_t, list);
+            
+            if(buddy_block == NULL)
             {
-                found = 1;
+                break;
+            }
+            else if(buddy_block->block_address == BUDDY_ADDR(addr, i))
+            {
+                break;
             }
         }
         
-        if(found == 0)
-        {
-            break;
+        if(buddy_block == NULL){
+            g_pages[free_index].block_size = -1;
+            list_add(&g_pages[free_index].list, &free_area[i]);
+            return;
         }
-        else
+        else if(buddy_block->block_address != BUDDY_ADDR(addr, i))
         {
-            list_del_init(&buddy_block->list);
-            if(buddy_block->page_index < free_page->page_index)
-            {
-                free_page = buddy_block;
-            }
+            g_pages[free_index].block_size = -1;
+            list_add(&g_pages[free_index].list, &free_area[i]);
+            return;
         }
-        free_order = i;
+        
+        if((char *) addr > buddy_block -> block_address)
+        {
+            addr = buddy_block -> block_address;
+            free_index = ADDR_TO_PAGE(addr);
+        }
+        list_del(&(buddy_block->list));
     }
-    
-    free_page -> block_size = free_order;
-    list_add(&free_page->list, &free_area[free_order]);
-    
 }
 
 /**
